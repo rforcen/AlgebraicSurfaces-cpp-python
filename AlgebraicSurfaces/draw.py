@@ -9,9 +9,10 @@ from cpp.AlgebraicSurfaces import algebraic_surface, func_name, func_names
 
 class AlgebraicSurfaces_widget(RendererGL):
     coords = None
-    faces = None
     textures = None
     normals = None
+
+    color_bronze=(200, 132, 102)
 
     scale = 0.6
     win = None
@@ -43,7 +44,7 @@ class AlgebraicSurfaces_widget(RendererGL):
             gl.glEnd()
 
         def draw_mesh(gl):
-            gl.glColor3ub(200, 132, 102)
+            gl.glColor3ubv(self.color_bronze)
             gl.glEnable(gl.GL_NORMALIZE)
             gl.glBegin(gl.GL_QUADS)
 
@@ -82,14 +83,14 @@ class Main(QMainWindow):
 
 
 if __name__ == '__main__':
-    def print_funciotn_names():
+    def print_func_names():
         print('supported funcs:')
         for i, fn in enumerate(func_names()):
             print(f'{i:2}:{fn}')
 
-    print_funciotn_names()
+    print_func_names()
 
-    n_func, resolution = 6, 400
+    n_func, resolution = 22, 300
     app = QApplication(sys.argv)
     Main(n_func, resolution)
     app.exec_()

@@ -8,11 +8,13 @@
 #include <string>
 #include <vector>
 #include <simd/simd.h>
+#include "Thread.h"
 
 using std::vector, std::string, std::tuple;
 
 typedef vector<float>Coord;
 typedef Coord Normal;
+typedef Coord Texture;
 
 typedef vector<vector<float>> Textures;
 typedef vector<vector<float>> Coords;
@@ -30,7 +32,6 @@ public:
 
     bool scaled;
     float twoPi;
-    simd_float3 p;
     float fscale;
 
     Mesh mesh;
@@ -71,7 +72,7 @@ public:
     float scaleV(float val)  {  return val*difV + fromV;	}
     float scale01(float val) {	return val / Dif;	} // keep center
     float scale0to1(float val) {	return (val - MinVal) / Dif;	} // scale 0..1
-    void scale() {
+    void scale(simd_float3&p) {
         p.x = scale01(p.x);
         p.y = scale01(p.y);
         p.z = scale01(p.z);
@@ -80,7 +81,7 @@ public:
         return ParametricFunc(scaleU(u), scaleV(v));
     }
 
-    void minMaxP() { // update min/max in p
+    void minMaxP(simd_float3&p) { // update min/max in p
         if (p.x > mx)
             mx = p.x;
         if (p.y > my)
@@ -122,33 +123,33 @@ public:
         }
 
         Dif = fabs(MaxVal - MinVal);
+        fscale = (Dif == 0) ? 1 : 1. / Dif; // autoscale
     }
 
     simd_float3  calcNormal(simd_float3 p0, simd_float3 p1, simd_float3 p2) {
         return simd::normalize( simd::cross(p1-p2, p1-p0) );
     }
 
-    void addTextVertex(float tx, float ty) { // add textures coords and vertex
-        p = Eval(tx, ty);
+    void addTextVertex(int ix_coord, float tx, float ty) { // add textures coords and vertex
+        auto p = Eval(tx, ty);
         p *= fscale;
 
-        textures.push_back(Coord{tx,ty});
-        coords.push_back(Coord{p.x, p.y, p.z});
+        textures[ix_coord]  = Coord{tx,ty};
+        coords[ix_coord]    = Coord{p.x, p.y, p.z};
 
-        minMaxP();
+        minMaxP(p);
     }
 
     simd_float3 c2f3(Coord &c) { // convert vector<float> to simd_float3
         return simd_float3{c[0], c[1], c[2]};
 
     }
-    void addNormals() { // from last 3 coords
-        auto last_index=coords.size()-1;
-        auto p0=coords[last_index-0], p1=coords[last_index-1], p2=coords[last_index-3];
+    void addNormals(int ix_coord) { // from last 3 coords
+        auto p0=coords[ix_coord+0], p1=coords[ix_coord+1], p2=coords[ix_coord+3];
 
         auto n = calcNormal(c2f3(p0), c2f3(p1), c2f3(p2));
         for (int i=0; i<4; i++)
-            normals.push_back(Coord{n.x, n.y, n.z});
+            normals[ix_coord + i] = Coord{n.x, n.y, n.z};
     }
 
     void scaleCoords() {
@@ -164,9 +165,15 @@ public:
         mix = miy = miz = FLT_MAX;
     }
 
+    void init_mesh_vectors() { //
+        int n_coords = res*res*4;
+        coords  = Coords(n_coords, Coord());
+        normals = Normals(n_coords, Normal());
+        textures= Textures(n_coords, Texture());
+    }
+
+    // multithreaded generation
     Mesh calcMesh(int resol, float _fromU, float _toU, float _fromV,	float _toV) { // calc & load
-        // if (res == resol)
-        // return; // calculated? -> yes:return
 
         fromU = _fromU;
         toU = _toU;
@@ -178,25 +185,27 @@ public:
         setResol(resol);
         initMinMax();
 
-        coords.clear(); // init mesh vectors
-        textures.clear();
-        normals.clear();
+        init_mesh_vectors();
 
-        float dr = 1.0f / res, dt = 1.0f / res;
-        for (int i = 0; i < res; i++) { // generated QUADS
-            float idr = i * dr;
-            for (int j = 0; j < res; j++) {
-                float jdt = j * dt, jdr = jdt;
+        float dt = 1.0f / res;
 
-                addTextVertex(idr, jdr);
-                addTextVertex(idr + dr, jdt);
-                addTextVertex(idr + dr, jdt + dt);
-                addTextVertex(idr, jdt + dt);
+        Thread(res).run([this, dt](int i) {  // use all CPU threads to generate res x res QUADS
 
-                addNormals(); // 4 x last 3 coords
+            float idt = i * dt, jdt=0;
+
+            for (int j=0; j<res; j++, jdt+=dt) {
+
+                int ix_coord=(i * res+j) * 4;
+
+                addTextVertex(ix_coord+0, idt,          jdt);
+                addTextVertex(ix_coord+1, idt + dt,     jdt);
+                addTextVertex(ix_coord+2, idt + dt,     jdt + dt);
+                addTextVertex(ix_coord+3, idt,          jdt + dt);
+
+                addNormals(ix_coord); // 4 x last 3 coords
 
             }
-        }
+        });
 
         calcDif();
         fscale = (Dif == 0) ? 1 : 1. / Dif; // autoscale
@@ -236,6 +245,7 @@ public:
     float f(float v) {  return sin(2*sin(sin(sin(v))));    }
 
     simd_float3 ParametricFunc(float s, float t) {
+        simd_float3 p;
         p.x = (a - cos(t) + w * sin(b1 * s)) * cos(b2 * s);
         p.y = (a - cos(t) + w * sin(b1 * s)) * f(b2 * s);
         p.z = h * (w * sin(b1 * s) + f(t)) + c;
@@ -245,6 +255,7 @@ public:
 
 class Kuen : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         p.x = 2 * cosh(v) * (cos(u) + u * sin(u)) / (cosh(v) * cosh(v) + u * u);
         p.y = 2 * cosh(v) * (-u * cos(u) + sin(u)) /
                 (cosh(v) * cosh(v) + u * u);
@@ -255,6 +266,7 @@ class Kuen : public AlgebraicSurface {
 
 class ButterFly : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         float t1 = (exp(cos(u)) - 2 * cos(4 * u) + sqr5(sin(u / 12))) * sin(v);
         p.x = sin(u) * t1;
         p.y = cos(u) * t1;
@@ -265,6 +277,7 @@ class ButterFly : public AlgebraicSurface {
 
 class RoseSurface : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         float a = 1, n = 7;
         p.x = a * sin(n * u) * cos(u) * sin(v);
         p.y = a * sin(n * u) * sin(u) * sin(v);
@@ -275,15 +288,16 @@ class RoseSurface : public AlgebraicSurface {
 
 class UpDownShellSurface : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
-        p.x = u * sin(u) * cos(v);
-        p.y = u * cos(u) * cos(v);
-        p.z = u * sin(v); // -10,10, -10,10
-        return p;
+        return simd_float3 {
+         u * sin(u) * cos(v),
+         u * cos(u) * cos(v),
+         u * sin(v) }; // -10,10, -10,10
     }
 };
 
 class CayleySurface : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         // plot3d([u*sin(v)-u*cos(v), u^2*sin(v)*cos(v), u^3*sin(v)^2*cos(v)], u=0..0.5, v=0..2*M_PI, numpoints=1000);
         p.x = u * sin(v) - u * cos(v);
         p.y = sqr(u) * sin(v) * cos(v);
@@ -294,6 +308,7 @@ class CayleySurface : public AlgebraicSurface {
 
 class PluckerConoidSurface : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         p.x = u * v;
         p.y = u * sqrt(1 - sqr(v));
         p.z = 1 - sqr(v);
@@ -308,7 +323,7 @@ class AmmoniteSurface : public AlgebraicSurface {
         float N = 5.6f; // number of turns
         float F = 120.0f; // wave frequency
         float A = 0.2f; // wave amplitude
-
+        simd_float3 p;
         p.x = W(u) * cos(N * u) * (2 + sin(v + cos(F * u) * A));
         p.y = W(u) * sin(N * u) * (2 + sin(v + cos(F * u) * A));
         p.z = W(u) * cos(v);
@@ -319,6 +334,7 @@ class AmmoniteSurface : public AlgebraicSurface {
 class AppleSurface : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
         float R1 = 4, R2 = 3.8f;
+        simd_float3 p;
 
         p.x = cos(u) * (R1 + R2 * cos(v)) + pow((v / M_PI), 100);
         p.y = sin(u) * (R1 + R2 * cos(v)) + 0.25f * cos(5 * u);
@@ -330,6 +346,7 @@ class AppleSurface : public AlgebraicSurface {
 class AstroidalEllipseSurface : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
         float A = 1, B = 1, C = 1;
+        simd_float3 p;
 
         p.x = pow(A * cos(u) * cos(v), 3);
         p.y = pow(B * sin(u) * cos(v), 3);
@@ -341,6 +358,7 @@ class AstroidalEllipseSurface : public AlgebraicSurface {
 
 class BohemianDomeSurface : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         float A = 0.5f, B = 1.5f, C = 1;
         p.x = A * cos(u);
         p.y = B * cos(v) + A * sin(u);
@@ -351,6 +369,7 @@ class BohemianDomeSurface : public AlgebraicSurface {
 
 class ConicalSpiralSurface : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         p.x = u * v * sin(15 * v);
         p.y = v;
         p.z = u * v * cos(15 * v);
@@ -361,6 +380,7 @@ class ConicalSpiralSurface : public AlgebraicSurface {
 
 class EnneperSurface : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         p.x = u - u * u * u / 3 + u * v * v;
         p.y = v - v * v * v / 3 + v * u * u;
         p.z = u * u - v * v;
@@ -370,6 +390,7 @@ class EnneperSurface : public AlgebraicSurface {
 
 class Scherk : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         float aa = 0.1f;
         v += 0.1;
         p.x = u;
@@ -381,6 +402,7 @@ class Scherk : public AlgebraicSurface {
 
 class Dini : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         float psi = 0.3f; // aa;
         if (psi < 0.001f)
             psi = 0.001f;
@@ -409,6 +431,7 @@ public:
     KleinBottle() {	t = 4.5f;	}
 
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         float tmp = (4 + 2 * cos(u) * cos(t * v) - sin(2 * u) * sin(t * v));
         p.x = sin(v) * tmp;
         p.y = cos(v) * tmp;
@@ -424,6 +447,7 @@ public:
     KleinBottle0() { t = 4.5f;	}
 
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         p.x = (0 <= u && u < M_PI) ? 6 * cos(u) * (1 + sin(u)) +
                                      4 * (1 - 0.5f * cos(u)) * cos(u) * cos(v) :
                                      6 * cos(u) * (1 + sin(u)) + 4 * (1 - 0.5f * cos(u)) * cos(v + M_PI);
@@ -437,6 +461,7 @@ public:
 class Bour : public AlgebraicSurface {
 public:
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         p.x = u * cos(v) - 0.5f * u * u * cos(2 * v);
         p.y = -u * sin(v) - 0.5f * u * u * sin(2 * v);
         p.z = 4 / 3 * pow(u, 1.5f) * cos(1.5f * v);
@@ -459,6 +484,7 @@ public:
     }
 
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         p.x = -u + (2 * w1 * cosh(aa * u) * sinh(aa * u) / d(u, v));
         p.y = 2 * w * cosh(aa * u) * (-(w * cos(v) * cos(w * v)) -
                                       (sin(v) * sin(w * v))) / d(u, v);
@@ -495,6 +521,7 @@ public:
     inline float W(float u) {	return pow(u / (2*M_PI), P);	}
 
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         p.x = W(u) * cos(N * u) * (1 + cos(v));
         p.y = W(u) * sin(N * u) * (1 + cos(v));
         p.z = W(u) * (sin(v) + pow(sin(v / 2), K) * L) +
@@ -512,6 +539,7 @@ class TudorRoseSurface : public AlgebraicSurface {
     }
 
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         p.x = R(u, v) * cos(u) * cos(v);
         p.y = R(u, v) * sin(u) * cos(v);
         p.z = R(u, v) * sin(v) * 0.5f;
@@ -522,6 +550,7 @@ class TudorRoseSurface : public AlgebraicSurface {
 // Cap's surface
 class CapSurface : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         p.x = 0.5f * cos(u) * sin(2 * v);
         p.y = 0.5f * sin(u) * sin(2 * v);
         p.z = 0.5f * (sqr(cos(v)) - sqr(cos(u)) * sqr(sin(v)));
@@ -532,6 +561,7 @@ class CapSurface : public AlgebraicSurface {
 // Boy's surface
 class BoySurface : public AlgebraicSurface {
     simd_float3 ParametricFunc(float u, float v) {
+        simd_float3 p;
         float dv = (2 - sqrt(2) * sin(3 * u) * sin(2 * v)), d1 =
                 (cos(u) * sin(2 * v)), d2 = sqrt(2) * sqr(cos(v));
 
@@ -551,6 +581,7 @@ class BoySurface : public AlgebraicSurface {
 class RomanSurface : public AlgebraicSurface {
     simd_float3 ParametricFunc(float r, float t) // 0 <= r <= 1   |  0 <= t <= 2*PI
     {
+        simd_float3 p;
         float r2 = r * r, rq = sqrt((1 - r2)), st = sin(t), ct = cos(t);
         p.x = r2 * st * ct;
         p.y = r * st * rq;

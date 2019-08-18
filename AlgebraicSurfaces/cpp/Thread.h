@@ -15,8 +15,8 @@ using std::thread;
 
 class Thread {
 public:
-    Thread(int size) : nth(thread::hardware_concurrency()), size(size),
-    segSz(size/nth), threads(new thread[nth]) {}
+    Thread(int size) : nth(thread::hardware_concurrency()), segSz(size/nth),
+     threads(new thread[nth]), size(size) {}
     
     ~Thread() {
         delete[]threads;
@@ -52,8 +52,9 @@ public:
         }
         for (int t=0; t<nth; t++) threads[t].join();
     }
-    int nth, segSz, size;
+    int nth, segSz;
     thread *threads;
+    int size;
     
 };
 
