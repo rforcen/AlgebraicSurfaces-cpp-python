@@ -1,2 +1,2 @@
 # AlgebraicSurfaces-cpp-python
-Algebraic surfaces created in cpp, rendered in python using opengl pyqt5
+Algebraic surfaces created in cpp (uses multithreading), rendered in python using opengl pyqt5, macos ready included .so
